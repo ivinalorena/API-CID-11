@@ -1,4 +1,3 @@
-"""Consulta didática à ICD-API v2 da OMS. Python 3.10+, sem dependências externas."""
 import argparse
 import base64
 import json
@@ -104,6 +103,32 @@ def buscar_texto(texto, token, release="2026-01", idioma="en", flexivel=False):
     })
 
 
+def extrair_texto(valor):
+    """Extrai o texto de um campo JSON-LD, sem os blocos de idioma."""
+    if isinstance(valor, str):
+        return valor
+    if isinstance(valor, dict):
+        return extrair_texto(valor.get("@value", valor.get("label", "")))
+    return ""
+
+
+def organizar_entidade(entidade, codigo=None):
+    """Apresenta codigo, titulo, termos e parent como listas sem repeticoes."""
+    termos = entidade.get("indexTerm") or []
+    pais = entidade.get("parent") or []
+    if isinstance(pais, str):
+        pais = [pais]
+    codigo = codigo or entidade.get("code") or entidade.get("theCode")
+    titulo = extrair_texto(entidade.get("title"))
+    return {
+        "codigo": [codigo] if codigo else [],
+        "titulo": [titulo] if titulo else [],
+        "termos": list(dict.fromkeys(texto for termo in termos
+                                     if (texto := extrair_texto(termo)))),
+        "parent": list(dict.fromkeys(pais)),
+    }
+
+
 def main():
     """Lê o comando, autentica, executa uma operação e imprime o JSON."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -113,6 +138,7 @@ def main():
     parser.add_argument("--release", default="2026-01")
     parser.add_argument("--idioma", default="en")
     parser.add_argument("--flexivel", action="store_true", help="Usar somente com busca")
+    parser.add_argument("--bruto", action="store_true", help="Mostrar a resposta completa da OMS")
     args = parser.parse_args()
     if args.flexivel and args.operacao != "busca":
         parser.error("--flexivel só se aplica à operação busca")
@@ -125,6 +151,26 @@ def main():
             resultado = consultar_uri(args.valor, token, args.release, args.idioma)
         else:
             resultado = buscar_texto(args.valor, token, args.release, args.idioma, args.flexivel)
+        if not args.bruto:
+            if args.operacao == "codigo":
+                codigo = resultado["informacoes_codigo"].get("code") or resultado["codigo_consultado"]
+                resultado = organizar_entidade(resultado.get("entidade_principal") or {}, codigo)
+            elif args.operacao == "uri":
+                resultado = organizar_entidade(resultado)
+            else:
+                def organizar_candidato(candidato):
+                    item = organizar_entidade(candidato)
+                    if "score" in candidato:
+                        item["score"] = candidato["score"]
+                    if candidato.get("descendants"):
+                        item["descendentes"] = [organizar_candidato(filho)
+                                                for filho in candidato["descendants"]]
+                    return item
+                resultado = {
+                    "resultados": [organizar_candidato(item)
+                                   for item in resultado.get("destinationEntities") or []],
+                    "resultados_truncados": bool(resultado.get("resultChopped")),
+                }
         print(json.dumps(resultado, ensure_ascii=False, indent=2))
         return 0
     except (RuntimeError, OSError) as erro:
